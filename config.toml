@@ -1,0 +1,102 @@
+# ============================================================================
+#  auto-switch relay configuration
+#
+#  ComfyUI chain:
+#    client -> run_comfyui_proxy.sh :8189 (Bearer auth) -> relay :8188
+#           -> container 127.0.0.1:18188
+#  The relay's ComfyUI listener is loopback-only, so port 8188 is not a public
+#  way around the proxy's authentication.
+#
+#  Strata chain:
+#    client -> relay :8080 -> container 127.0.0.1:18080
+#
+#  The services themselves listen on loopback-only alternate ports; their
+#  docker-compose.yml files were changed accordingly. The public entry of
+#  ComfyUI is still run_comfyui_proxy.sh (port 8189).
+#
+#  Switch rule: a request for the inactive service only switches when the
+#  active service has not received a request for `cooldown_seconds`. Otherwise
+#  the request is answered with 503 + Retry-After.
+# ============================================================================
+
+[relay]
+bind_host = "0.0.0.0"          # default bind for services that do not override it
+admin_host = "127.0.0.1"       # control API: status + manual switch (loopback only)
+admin_port = 9099
+default_service = "comfyui"    # kept running at startup; the other one is stopped
+
+cooldown_seconds = 120         # 2 minutes of silence before a switch is allowed
+request_timeout_seconds = 600  # how long a request may wait for a switch to finish
+stream_timeout_seconds = 900   # idle timeout while copying a request/response body
+
+startup_reconcile = true       # at startup: keep default_service, stop the other
+auto_restart_active = true     # restart the active container if it disappears
+watchdog_interval_seconds = 30
+
+health_interval_seconds = 2
+health_timeout_seconds = 3
+
+state_file = "run/state.json"
+log_file = "logs/relay.log"
+log_level = "INFO"
+
+# ---------------------------------------------------------------------------
+#  ComfyUI (docker-compose in ../comfyui-docker)
+#  The real network entry is run_comfyui_proxy.sh on 8189; that proxy forwards
+#  into this listener, which forwards to the container. Keep bind_host on
+#  loopback so 8188 cannot be used to bypass the proxy's Bearer auth.
+# ---------------------------------------------------------------------------
+[services.comfyui]
+bind_host = "127.0.0.1"
+container = "comfyui-megapak"
+service = "comfyui"
+compose_file = "../comfyui-docker/docker-compose.yml"
+compose_dir = "../comfyui-docker"
+listen_port = 8188
+upstream = "127.0.0.1:18188"
+health_path = "/system_stats"
+#  Background UI polling must not count as "in use": these paths are proxied
+#  normally when ComfyUI is active, but never switch or refresh the cooldown.
+ignore_activity_paths = [
+  "/system_stats", "/object_info", "/queue", "/userdata", "/v2/userdata",
+  "/embeddings", "/extensions", "/features", "/customnode", "/ws",
+]
+stop_timeout_seconds = 60
+startup_timeout_seconds = 300
+
+# ---------------------------------------------------------------------------
+#  Strata (docker-compose in ../strata)
+#  Public port 8080 -> upstream 18080 (container still listens on 8080 inside)
+#  /health answers 200 even while the model loads, so readiness must check
+#  the JSON field "loaded": true.
+# ---------------------------------------------------------------------------
+[services.strata]
+container = "strata"
+service = "strata"
+compose_file = "../strata/docker-compose.yml"
+compose_dir = "../strata"
+listen_port = 8080
+upstream = "127.0.0.1:18080"
+health_path = "/health"
+health_json = { loaded = true }
+#  The Strata web UI / monitor polls these in the background; they must not
+#  keep Strata "in use" or trigger a switch. Real chat/completions requests
+#  still count. When Strata is inactive these paths answer 503 "inactive".
+ignore_activity_paths = [
+  "/health", "/api/health", "/v1/models", "/models", "/v1/status", "/status",
+  "/metrics", "/props", "/slots", "/api/requests", "/config", "/settings", "/mcp",
+]
+stop_timeout_seconds = 180
+startup_timeout_seconds = 900
+
+# ---------------------------------------------------------------------------
+#  ComfyUI entry proxy (run_comfyui_proxy.sh). run.sh starts/stops this
+#  together with the relay. Its upstream defaults to the relay's ComfyUI
+#  listener (http://127.0.0.1:8188); set upstream explicitly to override.
+#  Set enabled = false if you prefer to run the proxy yourself.
+# ---------------------------------------------------------------------------
+[proxy]
+enabled = true
+command = "../comfyui-docker/run_comfyui_proxy.sh"
+listen_port = 8189
+# upstream = "http://127.0.0.1:8188"
