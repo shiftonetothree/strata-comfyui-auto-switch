@@ -2,6 +2,7 @@
 # Control script for the auto-switch relay and the ComfyUI entry proxy.
 #
 #   ./run.sh start            start the relay, then run_comfyui_proxy.sh (idempotent)
+#   ./run.sh autostart        start relay in idle mode + proxy (for cron @reboot)
 #   ./run.sh stop             stop both (managed containers keep running)
 #   ./run.sh restart
 #   ./run.sh status           live relay JSON (proxy status on stderr)
@@ -27,6 +28,8 @@ LOG_FILE="logs/relay.log"
 OUT_FILE="logs/relay.out"
 PROXY_PID_FILE="run/comfyui-proxy.pid"
 PROXY_LOG="logs/comfyui-proxy.out"
+SYSTEMD_RELAY_UNIT="auto-switch-relay.service"
+SYSTEMD_PROXY_UNIT="auto-switch-proxy.service"
 
 admin_url() {
   "$PY" - "$CONFIG" <<'PYEOF'
@@ -109,6 +112,19 @@ listen_in_use() {
   return 1
 }
 
+# --------------------------------------------------------------- systemd
+
+systemd_active() {
+  command -v systemctl >/dev/null 2>&1 || return 1
+  systemctl is-active --quiet "$1" 2>/dev/null
+}
+
+systemd_hint() {
+  echo "this service is managed by systemd; use:" >&2
+  echo "  sudo systemctl start|stop|restart auto-switch-relay auto-switch-proxy" >&2
+  echo "  systemctl status auto-switch-relay auto-switch-proxy" >&2
+}
+
 # --------------------------------------------------------------- relay process
 
 cmd_start_relay() {
@@ -119,7 +135,7 @@ cmd_start_relay() {
   mkdir -p run logs
   rm -f "$PID_FILE"
   "$PY" relay.py --config "$CONFIG" --check >/dev/null
-  nohup "$PY" -u relay.py --config "$CONFIG" >>"$OUT_FILE" 2>&1 &
+  nohup "$PY" -u relay.py --config "$CONFIG" "$@" >>"$OUT_FILE" 2>&1 &
   local pid=$!
   echo "$pid" >"$PID_FILE"
 
@@ -170,6 +186,10 @@ proxy_running() {
 }
 
 proxy_start() {
+  if systemd_active "$SYSTEMD_PROXY_UNIT"; then
+    echo "ComfyUI entry proxy is running under systemd ($SYSTEMD_PROXY_UNIT)"
+    return 0
+  fi
   if [[ "$PROXY_ENABLED" != "true" ]]; then
     echo "ComfyUI entry proxy is disabled in config.toml ([proxy] enabled = false)"
     return 0
@@ -215,6 +235,10 @@ proxy_start() {
 }
 
 proxy_stop() {
+  if systemd_active "$SYSTEMD_PROXY_UNIT"; then
+    systemd_hint
+    return 1
+  fi
   local pid
   pid="$(read_pid "$PROXY_PID_FILE")" || return 0
   if ! kill -0 "$pid" 2>/dev/null; then
@@ -239,6 +263,8 @@ proxy_status() {
   fi
   if proxy_running; then
     echo "proxy:   running (pid $(read_pid "$PROXY_PID_FILE")), entry http://127.0.0.1:$PROXY_PORT -> $PROXY_UPSTREAM"
+  elif listen_in_use "$PROXY_PORT"; then
+    echo "proxy:   running (systemd or external process), entry http://127.0.0.1:$PROXY_PORT -> $PROXY_UPSTREAM"
   else
     echo "proxy:   NOT running (entry http://127.0.0.1:$PROXY_PORT)"
   fi
@@ -247,6 +273,10 @@ proxy_status() {
 # ------------------------------------------------------------------ commands
 
 cmd_start() {
+  if systemd_active "$SYSTEMD_RELAY_UNIT" || systemd_active "$SYSTEMD_PROXY_UNIT"; then
+    systemd_hint
+    return 0
+  fi
   local relay_was_started=0
   if ! is_running "$PID_FILE"; then
     cmd_start_relay || return 1
@@ -264,26 +294,54 @@ cmd_start() {
   fi
 }
 
+cmd_autostart() {
+  if systemd_active "$SYSTEMD_RELAY_UNIT" || systemd_active "$SYSTEMD_PROXY_UNIT"; then
+    systemd_hint
+    return 0
+  fi
+  local relay_was_started=0
+  if ! is_running "$PID_FILE"; then
+    cmd_start_relay --startup-mode idle || return 1
+    relay_was_started=1
+  else
+    echo "relay is already running; autostart leaves its mode unchanged"
+  fi
+  if ! proxy_start; then
+    if [[ "$relay_was_started" -eq 1 ]]; then
+      echo "stopping the relay again because the ComfyUI entry proxy failed to start" >&2
+      cmd_stop_relay
+    fi
+    return 1
+  fi
+}
+
 cmd_stop() {
+  if systemd_active "$SYSTEMD_RELAY_UNIT" || systemd_active "$SYSTEMD_PROXY_UNIT"; then
+    systemd_hint
+    return 1
+  fi
   proxy_stop
   cmd_stop_relay
 }
 
 cmd_restart() {
+  if systemd_active "$SYSTEMD_RELAY_UNIT" || systemd_active "$SYSTEMD_PROXY_UNIT"; then
+    systemd_hint
+    return 1
+  fi
   cmd_stop
   cmd_start
 }
 
 cmd_status() {
-  if ! is_running "$PID_FILE"; then
-    echo "relay is not running" >&2
-    proxy_status >&2
-    return 1
-  fi
   local url
   url="$(admin_url)"
   if ! curl -fsS -m 10 "$url/status" | "$PY" -c 'import json,sys; print(json.dumps(json.load(sys.stdin), indent=2, ensure_ascii=False))'; then
-    echo "admin API at $url did not answer; is the relay healthy?" >&2
+    if systemd_active "$SYSTEMD_RELAY_UNIT"; then
+      echo "relay unit is active but the admin API at $url did not answer; check journalctl -u $SYSTEMD_RELAY_UNIT" >&2
+    else
+      echo "relay is not running" >&2
+    fi
     tail -n 20 "$LOG_FILE" >&2 || true
     proxy_status >&2
     return 1
@@ -329,8 +387,7 @@ cmd_logs() {
       tail -n 100 -F "$LOG_FILE"
       ;;
     proxy|comfyui)
-      touch "$PROXY_LOG"
-      tail -n 100 -F "$PROXY_LOG"
+      proxy_logs
       ;;
     *)
       echo "usage: $0 logs [relay|proxy]" >&2
@@ -339,17 +396,22 @@ cmd_logs() {
   esac
 }
 
+proxy_logs() {
+  if systemd_active "$SYSTEMD_PROXY_UNIT"; then
+    exec journalctl -u "$SYSTEMD_PROXY_UNIT" -n 100 -f
+  fi
+  mkdir -p logs
+  touch "$PROXY_LOG"
+  tail -n 100 -F "$PROXY_LOG"
+}
+
 cmd_proxy() {
   case "${1:-status}" in
     start) proxy_start ;;
     stop) proxy_stop ;;
     restart) proxy_stop; proxy_start ;;
     status) proxy_status ;;
-    logs)
-      mkdir -p logs
-      touch "$PROXY_LOG"
-      tail -n 100 -F "$PROXY_LOG"
-      ;;
+    logs) proxy_logs ;;
     *)
       echo "usage: $0 proxy [start|stop|restart|status|logs]" >&2
       return 2
@@ -368,6 +430,7 @@ cmd_check() {
 
 case "${1:-}" in
   start) cmd_start ;;
+  autostart) cmd_autostart ;;
   stop) cmd_stop ;;
   restart) cmd_restart ;;
   status) cmd_status ;;
@@ -377,11 +440,11 @@ case "${1:-}" in
   run|foreground) cmd_run ;;
   check) cmd_check ;;
   ""|-h|--help|help)
-    sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'
     ;;
   *)
     echo "unknown command: $1" >&2
-    sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//' >&2
+    sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//' >&2
     exit 2
     ;;
 esac

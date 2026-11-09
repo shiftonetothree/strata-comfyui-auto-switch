@@ -70,6 +70,23 @@ class ConfigTestCase(unittest.TestCase):
         self.assertEqual(config.services["a"].bind_host, "127.0.0.1")
         self.assertIsNone(config.services["b"].bind_host)
 
+    def test_startup_mode(self):
+        config = load_config(self.write_config(self.base_config()))
+        self.assertEqual(config.startup_mode, "default")
+
+        text = self.base_config().replace(
+            "admin_port = 9099", "admin_port = 9099\nstartup_mode = \"idle\""
+        )
+        config = load_config(self.write_config(text))
+        self.assertEqual(config.startup_mode, "idle")
+
+    def test_invalid_startup_mode_rejected(self):
+        text = self.base_config().replace(
+            "admin_port = 9099", "admin_port = 9099\nstartup_mode = \"later\""
+        )
+        with self.assertRaisesRegex(ConfigError, "startup_mode"):
+            load_config(self.write_config(text))
+
     def test_ignore_activity_paths(self):
         text = self.base_config().replace(
             "        listen_port = 8188",

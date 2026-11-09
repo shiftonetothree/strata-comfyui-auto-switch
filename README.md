@@ -103,7 +103,8 @@ curl -s -X POST 'http://127.0.0.1:9099/switch/strata?force=1'
 | 键 | 默认 | 含义 |
 |---|---|---|
 | `cooldown_seconds` | `120` | 切换所需的最小空闲时间 |
-| `default_service` | `comfyui` | 启动时保留的服务 |
+| `default_service` | `comfyui` | 启动时保留的服务（`startup_mode=default` 时） |
+| `startup_mode` | `default` | `default`：启动时拉起默认服务；`idle`：只监听，不启动任何容器 |
 | `request_timeout_seconds` | `600` | 请求等待切换完成的上限 |
 | `startup_reconcile` | `true` | 启动时强制只保留默认服务 |
 | `auto_restart_active` | `true` | 当前服务容器意外退出时自动重启 |
@@ -166,22 +167,60 @@ cd ../strata && docker compose up -d --force-recreate
 
 ## 8. 后台运行与开机自启
 
-当前按"前台/后台脚本"方式部署，没有安装 systemd 服务。若需要开机自启，可以加一条
-crontab（或自行写 systemd unit）：
+### systemd（推荐）
+
+```bash
+cd /mnt/kvm/auto-switch
+sudo ./install-systemd.sh
+```
+
+安装两个系统服务：
+
+- `auto-switch-relay.service`：relay，启动参数带 `--startup-mode idle`
+- `auto-switch-proxy.service`：`run_comfyui_proxy.sh`（8189 认证入口）
+
+**开机时只启动 relay 和认证代理，不会启动 ComfyUI 或 Strata。** 第一次真实请求
+到达时，relay 才会启动对应容器；`ignore_activity_paths` 里的健康/状态轮询不会触发启动。
+
+安装后：
+
+- `./run.sh status`、`./run.sh switch ...` 仍然可用（走管理 API）。
+- `./run.sh start/stop` 会提示改用 `systemctl`，避免和 systemd 抢 PID/端口。
+- 日志：`journalctl -u auto-switch-relay -f`、`journalctl -u auto-switch-proxy -f`。
+- 状态/停止：`systemctl status auto-switch-relay auto-switch-proxy`、
+  `sudo systemctl stop auto-switch-relay auto-switch-proxy`。
+- 卸载：`sudo ./uninstall-systemd.sh`（不会停止容器）。
+
+安装脚本会先停掉 `run.sh` 手工启动的 relay/代理，但**不会停止已经运行的容器**。
+如果安装时 ComfyUI/Strata 还在跑，它们会继续跑；下次开机才是空闲状态。
+想立刻空闲：在对应项目目录执行 `docker compose stop`。
+
+### cron（不需要 sudo 的替代方案）
+
+`run.sh autostart` 以 idle 模式启动 relay + 代理（不会启动容器），可以放进用户 crontab：
 
 ```cron
-@reboot /mnt/kvm/auto-switch/run.sh start
+@reboot /mnt/kvm/auto-switch/run.sh autostart
+```
+
+cron 不负责崩溃重启，systemd 更稳；两种方式不要同时启用。
+
+### 手动
+
+```bash
+./run.sh start              # 按 startup_mode=default 拉起 default_service
+./run.sh autostart          # idle：只启动 relay + 代理
+./run.sh stop               # 停止 relay + 代理（不停止容器）
 ```
 
 注意：
 
-- `run.sh stop` 会停止 relay 和 8189 入口代理，但**不会**停止正在运行的容器；
-  需要释放资源时手动 `docker compose stop` 或让中转切到另一个服务。
-- 入口代理的日志在 `logs/comfyui-proxy.out`，PID 在 `run/comfyui-proxy.pid`；
-  用 `./run.sh proxy status|logs` 查看。
+- `run.sh stop` / `systemctl stop` 都不会停止正在运行的容器；需要释放资源时手动
+  `docker compose stop` 或让中转切到另一个服务。
+- 入口代理手工运行时日志在 `logs/comfyui-proxy.out`，PID 在 `run/comfyui-proxy.pid`；
+  用 `./run.sh proxy status|logs` 查看；systemd 模式下用 `journalctl`。
 - 不要再直接执行两个项目里的 `./start.sh` 或 `docker compose up`：那会绕过中转、
-  可能让两个服务同时运行。服务的启停交给中转（`run.sh switch`），或者只启动中转，
-  由它按默认服务收敛。
+  可能让两个服务同时运行。服务的启停交给中转（`run.sh switch` / 首次请求）。
 
 ## 9. 测试
 
@@ -198,10 +237,12 @@ HTTP/分块/WebSocket 转发、503 页面、管理 API、配置校验。
 ```
 auto-switch/
 ├── config.toml      # 服务、端口、冷却、健康检查、入口代理
-├── run.sh           # start/stop/status/switch/logs/proxy
+├── run.sh           # start/autostart/stop/status/switch/logs/proxy
+├── install-systemd.sh / uninstall-systemd.sh
+├── systemd/         # auto-switch-relay.service.in、auto-switch-proxy.service.in
 ├── relay.py         # 入口
 ├── relay/           # config / docker / manager / proxy / admin / cli
-├── tests/           # 46 个单元与端到端测试
+├── tests/           # 50 个单元与端到端测试
 ├── logs/            # relay.log（10MB × 5 轮转）、relay.out、comfyui-proxy.out
 └── run/             # relay.pid、comfyui-proxy.pid、state.json
 ```

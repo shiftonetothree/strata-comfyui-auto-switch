@@ -1,0 +1,24 @@
+[Unit]
+Description=ComfyUI entry proxy (run_comfyui_proxy.sh, Bearer auth)
+Documentation=file://__PROJECT_DIR__/README.md
+After=network-online.target auto-switch-relay.service
+Wants=network-online.target auto-switch-relay.service
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=__USER__
+Group=__USER__
+WorkingDirectory=__COMFY_DIR__
+Environment=HOME=__HOME__
+Environment=PYTHON_BIN=__PROXY_PYTHON__
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=/bin/bash __PROXY_SCRIPT__ http://127.0.0.1:8188 8189
+Restart=on-failure
+RestartSec=3
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

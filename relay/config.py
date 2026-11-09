@@ -55,6 +55,7 @@ class RelayConfig:
     admin_host: str
     admin_port: int
     default_service: str | None
+    startup_mode: str
     cooldown_seconds: float
     request_timeout_seconds: float
     health_interval_seconds: float
@@ -262,12 +263,22 @@ def load_config(path: str | pathlib.Path) -> RelayConfig:
                 f"relay.default_service {default_service!r} is not one of {sorted(services)}"
             )
 
+    startup_mode = _as_str(
+        relay_raw.get("startup_mode", "default"), "relay.startup_mode"
+    ).lower()
+    if startup_mode not in ("default", "idle"):
+        raise ConfigError(
+            "relay.startup_mode must be 'default' or 'idle' "
+            f"(got {startup_mode!r})"
+        )
+
     return RelayConfig(
         path=config_path,
         bind_host=bind_host,
         admin_host=admin_host,
         admin_port=admin_port,
         default_service=default_service,
+        startup_mode=startup_mode,
         cooldown_seconds=_as_float(
             relay_raw.get("cooldown_seconds", 120), "relay.cooldown_seconds", minimum=0.0
         ),
@@ -316,6 +327,7 @@ def describe(config: RelayConfig) -> str:
         f"bind:          {config.bind_host}",
         f"admin:         http://{config.admin_host}:{config.admin_port}",
         f"default:       {config.default_service or '(none)'}",
+        f"startup:       {config.startup_mode}",
         f"cooldown:      {config.cooldown_seconds:g}s",
     ]
     for name, service in config.services.items():

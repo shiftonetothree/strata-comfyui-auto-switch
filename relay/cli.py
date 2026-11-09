@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import dataclasses
 import logging
 import pathlib
 import signal
@@ -38,6 +39,14 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="validate the configuration and exit",
     )
+    parser.add_argument(
+        "--startup-mode",
+        choices=("default", "idle"),
+        help=(
+            "override relay.startup_mode: 'default' keeps the default service, "
+            "'idle' starts no container until the first request"
+        ),
+    )
     args = parser.parse_args(argv)
 
     try:
@@ -45,6 +54,9 @@ def main(argv: list[str] | None = None) -> int:
     except ConfigError as exc:
         print(f"config error: {exc}", file=sys.stderr)
         return 2
+
+    if args.startup_mode and args.startup_mode != config.startup_mode:
+        config = dataclasses.replace(config, startup_mode=args.startup_mode)
 
     if args.check:
         print(describe(config))
@@ -61,10 +73,11 @@ def main(argv: list[str] | None = None) -> int:
 async def _run(config) -> None:
     logger = setup_logging(config)
     logger.info(
-        "starting relay: %s (cooldown %ss, default %s)",
+        "starting relay: %s (cooldown %ss, default %s, startup %s)",
         config.path,
         f"{config.cooldown_seconds:g}",
         config.default_service or "(none)",
+        config.startup_mode,
     )
 
     docker = Docker()

@@ -24,6 +24,11 @@ bind_host = "0.0.0.0"          # default bind for services that do not override 
 admin_host = "127.0.0.1"       # control API: status + manual switch (loopback only)
 admin_port = 9099
 default_service = "comfyui"    # kept running at startup; the other one is stopped
+# "default": startup keeps default_service (manual ./run.sh start)
+# "idle":    startup only listens; nothing is started until the first request
+# The systemd unit passes --startup-mode idle explicitly, so boot is idle while
+# manual ./run.sh start still behaves as before.
+startup_mode = "default"
 
 cooldown_seconds = 120         # 2 minutes of silence before a switch is allowed
 request_timeout_seconds = 600  # how long a request may wait for a switch to finish

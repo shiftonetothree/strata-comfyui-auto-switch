@@ -233,6 +233,34 @@ class ManagerTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(manager.active, "comfyui")
         self.assertEqual(docker.calls, [("stop", "strata")])
 
+    async def test_idle_startup_does_not_touch_containers(self):
+        docker = FakeDocker({"comfyui-container": True, "strata-container": True})
+        manager, clock, _ = self.make_manager(
+            docker, startup_mode="idle", startup_reconcile=True
+        )
+        manager.config.state_file.parent.mkdir(parents=True, exist_ok=True)
+        manager.config.state_file.write_text(json.dumps({"active": "comfyui"}))
+
+        await manager.load_state()
+        manager.start_background()
+        await asyncio.sleep(0.05)
+
+        self.assertIsNone(manager.active)
+        self.assertIsNone(manager._startup_task)
+        self.assertEqual(docker.calls, [])
+        self.assertNotIn("comfyui", manager.last_activity)
+
+    async def test_idle_first_request_stops_manually_started_other(self):
+        docker = FakeDocker({"comfyui-container": True, "strata-container": False})
+        manager, clock, _ = self.make_manager(docker, startup_mode="idle")
+
+        await manager.ensure_active("strata")
+
+        self.assertEqual(manager.active, "strata")
+        self.assertEqual(
+            docker.calls, [("stop", "comfyui"), ("start", "strata")]
+        )
+
     async def test_load_state_restores_active_when_reconcile_is_off(self):
         docker = FakeDocker({"strata-container": True})
         config = make_config(self.dir, startup_reconcile=False)

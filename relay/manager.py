@@ -110,6 +110,16 @@ class ServiceManager:
         self.request_count = _safe_int(data.get("request_count"))
         self.last_error = data.get("last_error") or None
 
+        if self.config.startup_mode == "idle":
+            # Autostart: listen, but do not touch any container until a request
+            # arrives. The persisted "active" value is deliberately ignored.
+            self.active = None
+            self._persist()
+            log.info(
+                "startup mode is idle: no service will be started until the first request"
+            )
+            return
+
         if not self.config.startup_reconcile:
             active = data.get("active")
             if active in self.services:
@@ -122,7 +132,7 @@ class ServiceManager:
             self._persist()
 
     def start_background(self) -> None:
-        if self.config.startup_reconcile:
+        if self.config.startup_mode != "idle" and self.config.startup_reconcile:
             self._startup_task = asyncio.create_task(self._reconcile(), name="startup-reconcile")
         if self.config.auto_restart_active:
             self._watchdog_task = asyncio.create_task(self._watchdog(), name="watchdog")
@@ -277,6 +287,16 @@ class ServiceManager:
                 await self._stop(previous)
             elif previous == target:
                 log.info("%s is already the active service; ensuring it is healthy", target)
+            else:
+                # Idle startup: a container may have been started by hand before
+                # the relay saw any request. Stop it so only one service runs.
+                for other_name in self.services:
+                    if other_name != target and await self._safe_running(other_name):
+                        log.info(
+                            "stopping %s (it was running while the relay was idle)",
+                            other_name,
+                        )
+                        await self._stop(other_name)
 
             async with self._guard:
                 self.active = None  # nothing is serving while the target boots
@@ -560,6 +580,7 @@ class ServiceManager:
             "active": self.active,
             "switching_to": self.switching_to,
             "default_service": self.config.default_service,
+            "startup_mode": self.config.startup_mode,
             "cooldown_seconds": self.config.cooldown_seconds,
             "cooldown_remaining_seconds": round(self._cooldown_remaining(), 1),
             "last_error": self.last_error,

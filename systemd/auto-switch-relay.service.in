@@ -1,0 +1,28 @@
+[Unit]
+Description=ComfyUI / Strata auto-switch relay
+Documentation=file://__PROJECT_DIR__/README.md
+# Docker is needed only when a request triggers a switch; the relay itself
+# starts without touching any container.
+After=network-online.target docker.service
+Wants=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=__USER__
+Group=__USER__
+WorkingDirectory=__PROJECT_DIR__
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=RELAY_CONSOLE=1
+# --startup-mode idle: at boot the relay only listens.  It does NOT start
+# ComfyUI or Strata; the first real request starts the requested service.
+ExecStart=__RELAY_PYTHON__ -u __PROJECT_DIR__/relay.py --config __PROJECT_DIR__/config.toml --startup-mode idle
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=180
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
